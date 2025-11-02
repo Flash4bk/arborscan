@@ -17,7 +17,7 @@ from server.risk_analysis import get_weather, get_soil, soil_factor, compute_ris
 app = FastAPI(
     title="ArborScan API",
     description="AI-анализ деревьев (вид, параметры, погода, почва, риск) + визуализация",
-    version="2.0"
+    version="2.1"
 )
 
 # === Пути к моделям ===
@@ -55,7 +55,7 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
         species, conf = classify_tree("temp.jpg")
         print(f"🌿 Определён вид: {species} ({conf*100:.1f}% уверенности)")
 
-        # === 3. Масштаб по палке (YOLOv8) ===
+        # === 3. Масштаб по палке ===
         inp = cv2.resize(img, (640, 640)).astype(np.float32) / 255.0
         inp = np.transpose(inp, (2, 0, 1))[None, :, :, :]
         res = stick_sess.run(None, {stick_sess.get_inputs()[0].name: inp})
@@ -64,11 +64,13 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
         if det.shape[0] == 0:
             print("⚠️ Палка не найдена, используем усреднённый масштаб 0.003 м/пиксель (~3 мм)")
             scale = 0.003
+            stick_box = None
         else:
             best = det[np.argmax(det[:, 4])]
             x1, y1, x2, y2 = best[:4]
             stick_px = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
             scale = 1.0 / max(stick_px, 1)
+            stick_box = (x1, y1, x2, y2)
             print(f"📏 Эталонная палка: {stick_px:.1f}px, масштаб: {scale:.5f} м/пиксель")
 
         if scale <= 0 or scale > 0.02:
@@ -114,15 +116,12 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
             trunk_diameter_m = 0
         print(f"🪵 Диаметр ствола (у земли): {trunk_diameter_m*100:.1f} см")
 
-        # --- DBH (1.3 м от земли) ---
+        # --- DBH ---
         y_dbh = int(y_end - 1.3 / scale)
         if 0 <= y_dbh < mask_bin.shape[0]:
             dbh_row = mask_bin[y_dbh, x:x+w]
             nz = np.where(dbh_row > 0)[0]
-            if len(nz) > 1:
-                DBH_m = (nz[-1] - nz[0]) * scale
-            else:
-                DBH_m = trunk_diameter_m
+            DBH_m = (nz[-1] - nz[0]) * scale if len(nz) > 1 else trunk_diameter_m
         else:
             DBH_m = trunk_diameter_m
         print(f"🪵 DBH (1.3м): {DBH_m*100:.1f} см")
@@ -147,11 +146,30 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
 
         # === 8. Визуализация ===
         vis = img.copy()
+
+        # Маска дерева — зелёная
+        mask_color = np.dstack([np.zeros_like(mask_bin), mask_bin * 255, np.zeros_like(mask_bin)]).astype(np.uint8)
+        vis = cv2.addWeighted(vis, 0.7, mask_color, 0.3, 0)
+
+        # Контур дерева и bbox
         cv2.drawContours(vis, [tree_contour], -1, (0, 255, 0), 2)
-        cv2.rectangle(vis, (x, y), (x+w, y+h), (255, 0, 0), 2)
-        cv2.line(vis, (x, y_end - int(1.3 / scale)), (x+w, y_end - int(1.3 / scale)), (0, 255, 255), 2)
-        cv2.putText(vis, f"H={H_m:.1f}m", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        cv2.putText(vis, f"D={trunk_diameter_m*100:.1f}cm", (x, y_end+30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.rectangle(vis, (x, y), (x + w, y + h), (255, 0, 0), 2)
+
+        # Линия DBH
+        cv2.line(vis, (x, y_end - int(1.3 / scale)), (x + w, y_end - int(1.3 / scale)), (0, 255, 255), 2)
+
+        # Палка (если найдена)
+        if stick_box is not None:
+            x1, y1, x2, y2 = stick_box
+            scale_factor = h0 / 640
+            x1, y1, x2, y2 = [int(v * scale_factor) for v in [x1, y1, x2, y2]]
+            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            cv2.putText(vis, "Палка (1м)", (x1, max(y1 - 10, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+        # Подписи параметров
+        cv2.putText(vis, f"H={H_m:.1f}m", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(vis, f"D={trunk_diameter_m*100:.1f}cm", (x, y_end + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
         out_path = os.path.join(os.path.dirname(__file__), "analyzed_tree.png")
         cv2.imwrite(out_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
         print(f"🖼️ Визуализация сохранена: {out_path}")
