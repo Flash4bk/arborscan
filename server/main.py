@@ -7,7 +7,7 @@ import onnxruntime as ort
 import traceback
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 # === Импорты из server ===
 from server.classify_tree import classify_tree
@@ -16,8 +16,8 @@ from server.risk_analysis import get_weather, get_soil, soil_factor, compute_ris
 # === Инициализация FastAPI ===
 app = FastAPI(
     title="ArborScan API",
-    description="AI-анализ деревьев (вид, параметры, погода, почва, риск)",
-    version="1.1"
+    description="AI-анализ деревьев (вид, параметры, погода, почва, риск) + визуализация",
+    version="2.0"
 )
 
 # === Пути к моделям ===
@@ -55,19 +55,22 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
         species, conf = classify_tree("temp.jpg")
         print(f"🌿 Определён вид: {species} ({conf*100:.1f}% уверенности)")
 
-        # === 3. Масштаб по палке ===
+        # === 3. Масштаб по палке (YOLOv8) ===
         inp = cv2.resize(img, (640, 640)).astype(np.float32) / 255.0
         inp = np.transpose(inp, (2, 0, 1))[None, :, :, :]
         res = stick_sess.run(None, {stick_sess.get_inputs()[0].name: inp})
         det = res[0][0]
+
         if det.shape[0] == 0:
-            print("⚠️ Палка не найдена, масштаб принят по умолчанию 1/200.")
-            Lpx = 200
+            print("⚠️ Палка не найдена, используем усреднённый масштаб 0.003 м/пиксель (~3 мм)")
+            scale = 0.003
         else:
             best = det[np.argmax(det[:, 4])]
             x1, y1, x2, y2 = best[:4]
-            Lpx = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) * (h0 / 640)
-        scale = 1.0 / Lpx
+            stick_px = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+            scale = 1.0 / max(stick_px, 1)
+            print(f"📏 Эталонная палка: {stick_px:.1f}px, масштаб: {scale:.5f} м/пиксель")
+
         if scale <= 0 or scale > 0.02:
             print("⚠️ Масштаб недостоверен, заменён на усреднённый (0.003 м/пиксель)")
             scale = 0.003
@@ -86,68 +89,74 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
         ys, xs = np.where(mask_bin > 0)
         if len(ys) == 0:
             raise RuntimeError("Не удалось выделить дерево на фото.")
-        y_top, y_bottom = ys.min(), ys.max()
-        H_m = (y_bottom - y_top) * scale
 
-        # === 5. DBH (на высоте груди) ===
-        y_dbh = int(y_bottom - 1.3 / scale)
-        DBH_m = 0
-        if 0 <= y_dbh < mask_bin.shape[0]:
-            row = mask_bin[y_dbh, :]
-            if np.any(row):
-                x_left, x_right = np.where(row > 0)[0][[0, -1]]
-                DBH_m = (x_right - x_left) * scale
+        # === 5. Геометрия дерева ===
+        contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            raise RuntimeError("Контур дерева не найден.")
+        tree_contour = max(contours, key=cv2.contourArea)
+        x, y, w, h = cv2.boundingRect(tree_contour)
 
-        # === 6. Реальный диаметр ствола (точное измерение) ===
-        bottom_part = mask_bin[int(y_bottom - (y_bottom - y_top) * 0.08):y_bottom, :]
-        widths = []
-        for y in range(bottom_part.shape[0]):
-            row = bottom_part[y, :]
-            x_nonzero = np.where(row > 0)[0]
-            if len(x_nonzero) > 10:
-                widths.append(x_nonzero[-1] - x_nonzero[0])
+        # --- высота ---
+        H_m = h * scale
+        print(f"📐 Высота дерева: {H_m:.2f} м")
 
-        if widths:
-            avg_width_px = np.median(widths)
-            trunk_diameter_m = avg_width_px * scale
+        # --- диаметр у земли ---
+        y_start = int(y + h * 0.9)
+        y_end = y + h
+        region = mask_bin[y_start:y_end, x:x+w]
+        proj = np.sum(region, axis=0)
+        nonzero = np.where(proj > 0)[0]
+        if len(nonzero) > 1:
+            trunk_width_px = nonzero[-1] - nonzero[0]
+            trunk_diameter_m = trunk_width_px * scale
         else:
-            trunk_diameter_m = DBH_m
+            trunk_diameter_m = 0
         print(f"🪵 Диаметр ствола (у земли): {trunk_diameter_m*100:.1f} см")
 
-        # === 7. Длина кроны ===
-        widths_crown = np.array([mask_bin[y, :].sum() for y in range(y_top, y_bottom)], dtype=np.float32)
-        dy = np.gradient(widths_crown)
-        crown_base_rel = np.argmax(dy > widths_crown.max() * 0.3) if np.any(dy > widths_crown.max() * 0.3) else int(len(widths_crown) * 0.6)
-        CL_px = (y_bottom - (y_top + crown_base_rel))
+        # --- DBH (1.3 м от земли) ---
+        y_dbh = int(y_end - 1.3 / scale)
+        if 0 <= y_dbh < mask_bin.shape[0]:
+            dbh_row = mask_bin[y_dbh, x:x+w]
+            nz = np.where(dbh_row > 0)[0]
+            if len(nz) > 1:
+                DBH_m = (nz[-1] - nz[0]) * scale
+            else:
+                DBH_m = trunk_diameter_m
+        else:
+            DBH_m = trunk_diameter_m
+        print(f"🪵 DBH (1.3м): {DBH_m*100:.1f} см")
+
+        # --- длина кроны ---
+        vertical_widths = np.array([mask_bin[y0, :].sum() for y0 in range(y, y+h)], dtype=np.float32)
+        max_w = np.max(vertical_widths)
+        threshold = max_w * 0.6
+        crown_top_idx = np.argmax(vertical_widths < threshold)
+        CL_px = (h - crown_top_idx) if crown_top_idx > 0 else int(h * 0.6)
         CL_m = CL_px * scale
+        print(f"🌿 Длина кроны: {CL_m:.2f} м")
 
-        print(f"📏 Высота={H_m:.2f}м, Крона={CL_m:.2f}м, DBH={DBH_m*100:.1f}см")
-
-        # === 8. Погода и почва ===
+        # === 6. Погода и почва ===
         wind_speed, gust, temp = get_weather(lat, lon)
         print(f"🌬️ Ветер: {wind_speed} м/с, порывы: {gust} м/с, температура: {temp}°C")
         clay, sand, silt, bd, oc = get_soil(lat, lon)
         k_soil = soil_factor(clay, sand)
 
-        # === 9. Риск ===
+        # === 7. Риск ===
         risk, level = compute_risk(species, H_m, DBH_m, CL_m, wind_speed, gust, k_soil)
 
-        # === 10. Визуализация ===
-        overlay = img.copy()
-        mask_color = np.dstack([np.zeros_like(mask_bin), mask_bin*255, np.zeros_like(mask_bin)]).astype(np.uint8)
-        overlay = cv2.addWeighted(overlay, 0.7, mask_color, 0.3, 0)
-
-        # рисуем линию измерения
-        y_line = y_bottom - int((y_bottom - y_top) * 0.05)
-        cv2.line(overlay, (0, y_line), (w0, y_line), (0, 255, 0), 2)
-        text = f"Диаметр: {trunk_diameter_m*100:.1f} см"
-        cv2.putText(overlay, text, (30, y_line - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
+        # === 8. Визуализация ===
+        vis = img.copy()
+        cv2.drawContours(vis, [tree_contour], -1, (0, 255, 0), 2)
+        cv2.rectangle(vis, (x, y), (x+w, y+h), (255, 0, 0), 2)
+        cv2.line(vis, (x, y_end - int(1.3 / scale)), (x+w, y_end - int(1.3 / scale)), (0, 255, 255), 2)
+        cv2.putText(vis, f"H={H_m:.1f}m", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(vis, f"D={trunk_diameter_m*100:.1f}cm", (x, y_end+30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         out_path = os.path.join(os.path.dirname(__file__), "analyzed_tree.png")
-        cv2.imwrite(out_path, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(out_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
         print(f"🖼️ Визуализация сохранена: {out_path}")
 
-        # === 11. Ответ ===
+        # === 9. Результат ===
         result = {
             "species": species,
             "confidence": round(conf * 100, 1),
@@ -158,7 +167,7 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
             "weather": {"wind": wind_speed, "gust": gust, "temp": temp},
             "soil": {"clay": clay, "sand": sand, "k_soil": k_soil},
             "risk": {"score": round(risk, 1), "level": level},
-            "image_path": "analyzed_tree.png"
+            "image_path": "/image"
         }
 
         sys.stdout.flush()
@@ -169,3 +178,12 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
         print("❌ Ошибка при анализе изображения:")
         traceback.print_exc()
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/image")
+def get_result_image():
+    """Позволяет скачать последнюю визуализацию"""
+    out_path = os.path.join(os.path.dirname(__file__), "analyzed_tree.png")
+    if not os.path.exists(out_path):
+        return JSONResponse({"error": "Нет визуализации"}, status_code=404)
+    return FileResponse(out_path, media_type="image/png", filename="analyzed_tree.png")
