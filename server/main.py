@@ -17,7 +17,7 @@ from server.risk_analysis import get_weather, get_soil, soil_factor, compute_ris
 app = FastAPI(
     title="ArborScan API",
     description="AI-анализ деревьев (вид, параметры, погода, почва, риск)",
-    version="1.0"
+    version="1.1"
 )
 
 # === Пути к моделям ===
@@ -68,6 +68,9 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
             x1, y1, x2, y2 = best[:4]
             Lpx = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) * (h0 / 640)
         scale = 1.0 / Lpx
+        if scale <= 0 or scale > 0.02:
+            print("⚠️ Масштаб недостоверен, заменён на усреднённый (0.003 м/пиксель)")
+            scale = 0.003
 
         # === 4. Сегментация дерева ===
         tree_inp = cv2.resize(img, (640, 640)).astype(np.float32) / 255.0
@@ -95,21 +98,26 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
                 x_left, x_right = np.where(row > 0)[0][[0, -1]]
                 DBH_m = (x_right - x_left) * scale
 
-        # === 6. Реальный диаметр ствола (в нижней части) ===
-        lower_mask = mask_bin[int(y_bottom - (y_bottom - y_top) * 0.3):y_bottom, :]
-        proj = np.sum(lower_mask, axis=0)
-        nonzero = np.where(proj > 0)[0]
-        if len(nonzero) > 1:
-            diameter_px = nonzero[-1] - nonzero[0]
-            trunk_diameter_m = diameter_px * scale
+        # === 6. Реальный диаметр ствола (точное измерение) ===
+        bottom_part = mask_bin[int(y_bottom - (y_bottom - y_top) * 0.08):y_bottom, :]
+        widths = []
+        for y in range(bottom_part.shape[0]):
+            row = bottom_part[y, :]
+            x_nonzero = np.where(row > 0)[0]
+            if len(x_nonzero) > 10:
+                widths.append(x_nonzero[-1] - x_nonzero[0])
+
+        if widths:
+            avg_width_px = np.median(widths)
+            trunk_diameter_m = avg_width_px * scale
         else:
             trunk_diameter_m = DBH_m
         print(f"🪵 Диаметр ствола (у земли): {trunk_diameter_m*100:.1f} см")
 
         # === 7. Длина кроны ===
-        widths = np.array([mask_bin[y, :].sum() for y in range(y_top, y_bottom)], dtype=np.float32)
-        dy = np.gradient(widths)
-        crown_base_rel = np.argmax(dy > widths.max() * 0.3) if np.any(dy > widths.max() * 0.3) else int(len(widths) * 0.6)
+        widths_crown = np.array([mask_bin[y, :].sum() for y in range(y_top, y_bottom)], dtype=np.float32)
+        dy = np.gradient(widths_crown)
+        crown_base_rel = np.argmax(dy > widths_crown.max() * 0.3) if np.any(dy > widths_crown.max() * 0.3) else int(len(widths_crown) * 0.6)
         CL_px = (y_bottom - (y_top + crown_base_rel))
         CL_m = CL_px * scale
 
@@ -124,7 +132,22 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
         # === 9. Риск ===
         risk, level = compute_risk(species, H_m, DBH_m, CL_m, wind_speed, gust, k_soil)
 
-        # === 10. Ответ ===
+        # === 10. Визуализация ===
+        overlay = img.copy()
+        mask_color = np.dstack([np.zeros_like(mask_bin), mask_bin*255, np.zeros_like(mask_bin)]).astype(np.uint8)
+        overlay = cv2.addWeighted(overlay, 0.7, mask_color, 0.3, 0)
+
+        # рисуем линию измерения
+        y_line = y_bottom - int((y_bottom - y_top) * 0.05)
+        cv2.line(overlay, (0, y_line), (w0, y_line), (0, 255, 0), 2)
+        text = f"Диаметр: {trunk_diameter_m*100:.1f} см"
+        cv2.putText(overlay, text, (30, y_line - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        out_path = os.path.join(os.path.dirname(__file__), "analyzed_tree.png")
+        cv2.imwrite(out_path, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+        print(f"🖼️ Визуализация сохранена: {out_path}")
+
+        # === 11. Ответ ===
         result = {
             "species": species,
             "confidence": round(conf * 100, 1),
@@ -134,10 +157,11 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
             "trunk_diameter_cm": round(trunk_diameter_m * 100, 1),
             "weather": {"wind": wind_speed, "gust": gust, "temp": temp},
             "soil": {"clay": clay, "sand": sand, "k_soil": k_soil},
-            "risk": {"score": round(risk, 1), "level": level}
+            "risk": {"score": round(risk, 1), "level": level},
+            "image_path": "analyzed_tree.png"
         }
 
-        sys.stdout.flush()  # мгновенная отправка
+        sys.stdout.flush()
         print("✅ Анализ завершён успешно.")
         return JSONResponse(content=result, media_type="application/json")
 
