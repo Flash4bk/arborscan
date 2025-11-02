@@ -1,46 +1,34 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
 
-class AnalysisResultScreen extends StatefulWidget {
+class AnalysisResultScreen extends StatelessWidget {
+  final Map<String, dynamic> result;
   final String apiUrl;
   final String imageUrl;
-  final Map<String, dynamic> result;
 
   const AnalysisResultScreen({
     super.key,
+    required this.result,
     required this.apiUrl,
     required this.imageUrl,
-    required this.result,
   });
 
   @override
-  State<AnalysisResultScreen> createState() => _AnalysisResultScreenState();
-}
-
-class _AnalysisResultScreenState extends State<AnalysisResultScreen> {
-  late Map<String, dynamic> result;
-
-  @override
-  void initState() {
-    super.initState();
-    result = widget.result;
-  }
-
-  Color _riskColor(String level) {
-    switch (level.toLowerCase()) {
-      case "высокий":
-        return Colors.red;
-      case "средний":
-        return Colors.orange;
-      default:
-        return Colors.green;
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final r = result;
+    final weather = result['weather'];
+    final soil = result['soil'];
+    final risk = result['risk'];
+    final species = result['species'] ?? 'Неизвестно';
+    final conf = result['confidence'] ?? 0.0;
+    final h = result['height_m'] ?? 0.0;
+    final crown = result['crown_len_m'] ?? 0.0;
+    final dbh = result['dbh_cm'] ?? 0.0;
+    final trunk = result['trunk_diameter_cm'] ?? 0.0;
+
+    final riskColor = {
+      'Низкий': Colors.green,
+      'Средний': Colors.orange,
+      'Высокий': Colors.red,
+    }[risk['level']] ?? Colors.grey;
 
     return Scaffold(
       appBar: AppBar(
@@ -50,126 +38,113 @@ class _AnalysisResultScreenState extends State<AnalysisResultScreen> {
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Вид дерева
+            // Вид
             Card(
-              elevation: 3,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              elevation: 2,
               child: ListTile(
-                leading: const Icon(Icons.park, color: Colors.green, size: 36),
-                title: Text('🌿 Вид: ${r["species"]}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                subtitle: Text('Уверенность: ${r["confidence"]}%'),
+                leading: const Icon(Icons.nature, color: Colors.green),
+                title: Text('Вид: $species'),
+                subtitle: Text('Уверенность: ${conf.toStringAsFixed(1)}%'),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
 
             // Параметры дерева
             Card(
-              elevation: 3,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text("📏 Параметры", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                    const Divider(),
-                    Text("Высота: ${r["height_m"]} м"),
-                    Text("Длина кроны: ${r["crown_len_m"]} м"),
-                    Text("DBH: ${r["dbh_cm"]} см"),
-                    Text("Диаметр ствола: ${r["trunk_diameter_cm"]} см"),
-                  ],
+              elevation: 2,
+              child: ListTile(
+                leading: const Icon(Icons.straighten, color: Colors.green),
+                title: const Text('Параметры дерева'),
+                subtitle: Text(
+                  'Высота: ${h.toStringAsFixed(2)} м\n'
+                  'Длина кроны: ${crown.toStringAsFixed(2)} м\n'
+                  'Диаметр у земли: ${trunk.toStringAsFixed(1)} см\n'
+                  'DBH (на 1.3м): ${dbh.toStringAsFixed(1)} см',
                 ),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
 
             // Погода
             Card(
-              elevation: 3,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text("🌬️ Погода", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                    const Divider(),
-                    Text("Ветер: ${r["weather"]["wind"]} м/с"),
-                    Text("Порывы: ${r["weather"]["gust"]} м/с"),
-                    Text("Температура: ${r["weather"]["temp"]} °C"),
-                  ],
-                ),
+              elevation: 2,
+              child: ListTile(
+                leading: const Icon(Icons.cloud, color: Colors.blue),
+                title: const Text('Погода'),
+                subtitle: weather is Map && weather.containsKey('message')
+                    ? Text(weather['message'], style: const TextStyle(color: Colors.grey))
+                    : Text(
+                        'Скорость ветра: ${weather["wind"] ?? "-"} м/с\n'
+                        'Порывы: ${weather["gust"] ?? "-"} м/с\n'
+                        'Температура: ${weather["temp"] ?? "-"}°C',
+                      ),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
 
             // Почва
             Card(
-              elevation: 3,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text("🌱 Почва", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                    const Divider(),
-                    Text("Глина: ${r["soil"]["clay"]}%"),
-                    Text("Песок: ${r["soil"]["sand"]}%"),
-                    Text("Фактор устойчивости: ${r["soil"]["k_soil"]}"),
-                  ],
-                ),
+              elevation: 2,
+              child: ListTile(
+                leading: const Icon(Icons.grass, color: Colors.brown),
+                title: const Text('Почва'),
+                subtitle: soil is Map && soil.containsKey('message')
+                    ? Text(soil['message'], style: const TextStyle(color: Colors.grey))
+                    : Text(
+                        'Глина: ${(soil["clay"] ?? 0).toStringAsFixed(1)}%\n'
+                        'Песок: ${(soil["sand"] ?? 0).toStringAsFixed(1)}%\n'
+                        'Коэф. устойчивости почвы: ${(soil["k_soil"] ?? 1.0).toStringAsFixed(2)}',
+                      ),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
 
-            // Риск падения
+            // Риск
             Card(
-              color: _riskColor(r["risk"]["level"]),
-              elevation: 3,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text("⚠️ Риск падения", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-                    const Divider(color: Colors.white70),
-                    Text(
-                      "${r["risk"]["level"]} (${r["risk"]["score"].toStringAsFixed(1)}/100)",
-                      style: const TextStyle(fontSize: 16, color: Colors.white),
-                    ),
-                  ],
-                ),
+              color: riskColor.withOpacity(0.15),
+              child: ListTile(
+                leading: Icon(Icons.warning_amber_rounded, color: riskColor),
+                title: Text('Риск падения: ${risk["level"] ?? "Неизвестно"}'),
+                subtitle: Text('Оценка: ${risk["score"] ?? 0}/100'),
               ),
             ),
             const SizedBox(height: 20),
 
-            // Фото анализа
-            Center(
-              child: Column(
-                children: [
-                  const Text("🖼️ Визуализация анализа", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 10),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.network(
-                      widget.imageUrl,
-                      fit: BoxFit.contain,
-                      loadingBuilder: (context, child, progress) {
-                        if (progress == null) return child;
-                        return const Padding(
-                          padding: EdgeInsets.all(16),
-                          child: CircularProgressIndicator(),
-                        );
-                      },
-                      errorBuilder: (context, error, stackTrace) =>
-                          const Text("Ошибка загрузки изображения"),
-                    ),
-                  ),
-                ],
+            // Фото
+            const Text(
+              "📸 Визуализация анализа",
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.network(
+                imageUrl,
+                fit: BoxFit.contain,
+                loadingBuilder: (context, child, progress) {
+                  if (progress == null) return child;
+                  return const Center(child: CircularProgressIndicator());
+                },
+                errorBuilder: (context, _, __) => Container(
+                  color: Colors.grey.shade200,
+                  height: 200,
+                  child: const Center(child: Text("Ошибка загрузки изображения")),
+                ),
+              ),
+            ),
+            const SizedBox(height: 30),
+
+            // Кнопка "Назад"
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pop(context),
+              icon: const Icon(Icons.arrow_back),
+              label: const Text("Назад"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green.shade600,
+                padding: const EdgeInsets.symmetric(vertical: 14),
               ),
             ),
           ],

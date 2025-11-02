@@ -127,44 +127,53 @@ async def analyze_tree(
         print(f"🌿 Вид: {species} ({conf*100:.1f}%)")
 
         # ------------ 3) detect stick for scale ------------
-        # resize to 640x640 (без letterbox — как и раньше)
+        
+        
+            # resize to 640x640 (без letterbox — как и раньше)
         inp = cv2.resize(img, (640, 640)).astype(np.float32) / 255.0
         inp = np.transpose(inp, (2, 0, 1))[None, :, :, :]
         res = stick_sess.run(None, {stick_sess.get_inputs()[0].name: inp})
-        det = res[0][0]  # [N, 5] x1,y1,x2,y2,score in 640-space
 
+                    # YOLO может вернуть разное количество параметров: [x1,y1,x2,y2,conf,(cls)...]
+        det = res[0][0]
         stick_box_640 = None
         scale = None
+
         if det.shape[0] > 0:
-            # берём самую "вертикальную" и высокую рамку
-            best_idx = None
-            best_score = -1
-            for i in range(det.shape[0]):
-                x1, y1, x2, y2, s = det[i]
-                w = max(x2 - x1, 1e-3)
-                h = max(y2 - y1, 1e-3)
-                vert = h / w
-                score = s * vert * h
-                if score > best_score:
-                    best_score = score
-                    best_idx = i
-            x1, y1, x2, y2, s = det[best_idx]
-            stick_box_640 = (float(x1), float(y1), float(x2), float(y2))
+                # берём самую "вертикальную" и высокую рамку
+                best_idx = None
+                best_score = -1.0
+                for i in range(det.shape[0]):
+                    # безопасно обрезаем до первых 5 элементов
+                    x1, y1, x2, y2, s = det[i][:5]
+                    w = max(x2 - x1, 1e-3)
+                    h = max(y2 - y1, 1e-3)
+                    vert = h / w
+                    score = float(s) * vert * h
+                    if score > best_score:
+                        best_score = score
+                        best_idx = i
 
-            # перевод в исходное изображение
-            sx, sy = w0 / 640.0, h0 / 640.0
-            x1o, y1o, x2o, y2o = int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)
-            stick_h_px = max(y2o - y1o, 1)
-            # 1 м реальной длины
-            scale = 1.0 / stick_h_px  # м/пикс
+                # если найден лучший детект
+                if best_idx is not None:
+                    x1, y1, x2, y2, s = det[best_idx][:5]
+                    stick_box_640 = (float(x1), float(y1), float(x2), float(y2))
 
-            print(f"📏 Палка: {stick_h_px}px по высоте → масштаб {scale:.5f} м/пикс")
+                    # масштабирование из 640x640 → оригинальное изображение
+                    sx, sy = w0 / 640.0, h0 / 640.0
+                    x1o, y1o, x2o, y2o = int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)
+                    stick_h_px = max(y2o - y1o, 1)
+                    # 1 метр реальной длины = высота рамки
+                    scale = 1.0 / stick_h_px  # м/пикс
+                    print(f"📏 Палка: {stick_h_px}px по высоте → масштаб {scale:.5f} м/пикс")
         else:
-            print("⚠️ Палка не найдена, ставлю усреднённый масштаб 0.003 м/пикс (≈3 мм)")
-            scale = 0.003
+                print("⚠️ Палка не найдена, ставлю усреднённый масштаб 0.003 м/пикс (≈3 мм)")
+                scale = 0.003
 
-        if not (0 < scale < 0.02):  # предохранитель
-            scale = 0.003
+        if not (0 < scale < 0.02):  # предохранитель от ошибок масштаба
+                scale = 0.003
+
+
 
         # ------------ 4) tree segmentation ------------
         seg_inp = cv2.resize(img, (640, 640)).astype(np.float32) / 255.0
