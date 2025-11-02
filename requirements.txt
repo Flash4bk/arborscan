@@ -6,3 +6,5 @@ numpy
 matplotlib
 requests
 pillow
+python-multipart
+
