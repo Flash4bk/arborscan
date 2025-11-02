@@ -1,9 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter_spinkit/flutter_spinkit.dart';
+import 'screens/analysis_result_screen.dart';
+import 'screens/splash_screen.dart';
+
 
 void main() {
   runApp(const ArborScanApp());
@@ -18,7 +21,7 @@ class ArborScanApp extends StatelessWidget {
       title: 'ArborScan',
       theme: ThemeData(primarySwatch: Colors.green),
       debugShowCheckedModeBanner: false,
-      home: const TreeAnalyzerScreen(),
+      home: const SplashScreen(),
     );
   }
 }
@@ -32,116 +35,130 @@ class TreeAnalyzerScreen extends StatefulWidget {
 
 class _TreeAnalyzerScreenState extends State<TreeAnalyzerScreen> {
   File? _image;
-  bool _loading = false;
-  Map<String, dynamic>? _result;
-
+  bool _analyzing = false;
   final ImagePicker _picker = ImagePicker();
-  final String apiUrl = "https://arborscan-production.up.railway.app/analyze";
+
+  // 👉 Укажи адрес своего Railway-сервера:
+  final String apiUrl = "https://arborscan-production.up.railway.app";
 
   Future<void> _pickImage(ImageSource source) async {
     final pickedFile = await _picker.pickImage(source: source);
     if (pickedFile != null) {
-      setState(() {
-        _image = File(pickedFile.path);
-        _result = null;
-      });
+      setState(() => _image = File(pickedFile.path));
     }
   }
 
-  Future<void> _analyzeImage() async {
+  Future<void> _analyzeTree() async {
     if (_image == null) return;
 
-    setState(() => _loading = true);
-
-    var request = http.MultipartRequest('POST', Uri.parse(apiUrl))
-      ..fields['lat'] = '55.75'
-      ..fields['lon'] = '37.62'
-      ..files.add(await http.MultipartFile.fromPath('file', _image!.path));
+    setState(() => _analyzing = true);
 
     try {
+      var request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$apiUrl/analyze?lat=55.75&lon=37.62'),
+      );
+      request.files.add(await http.MultipartFile.fromPath('file', _image!.path));
+
       var response = await request.send();
       var res = await http.Response.fromStream(response);
 
       if (res.statusCode == 200) {
-        setState(() => _result = jsonDecode(res.body));
+        final result = jsonDecode(res.body);
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => AnalysisResultScreen(
+              apiUrl: apiUrl,
+              imageUrl: "$apiUrl${result["image_path"]}",
+              result: result,
+            ),
+          ),
+        );
       } else {
-        setState(() => _result = {"error": "Ошибка сервера"});
+        _showError("Ошибка ${res.statusCode}: ${res.body}");
       }
     } catch (e) {
-      setState(() => _result = {"error": e.toString()});
+      _showError("Ошибка отправки: $e");
     }
 
-    setState(() => _loading = false);
+    setState(() => _analyzing = false);
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message, style: const TextStyle(color: Colors.white)), backgroundColor: Colors.red),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('ArborScan')),
+      appBar: AppBar(
+        title: const Text("ArborScan"),
+        backgroundColor: Colors.green.shade700,
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            if (_image != null)
-              Image.file(_image!, height: 200, fit: BoxFit.cover)
-            else
-              Container(
-                height: 200,
-                color: Colors.grey[200],
-                child: const Center(child: Text("Загрузите фото дерева")),
-              ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: () => _pickImage(ImageSource.camera),
-                  icon: const Icon(Icons.camera_alt),
-                  label: const Text("Камера"),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => _pickImage(ImageSource.gallery),
-                  icon: const Icon(Icons.photo),
-                  label: const Text("Галерея"),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton.icon(
-              onPressed: _loading ? null : _analyzeImage,
-              icon: const Icon(Icons.analytics),
-              label: const Text("Анализировать"),
-            ),
-            const SizedBox(height: 20),
-            if (_loading)
-              const SpinKitFadingCircle(color: Colors.green)
-            else if (_result != null)
-              Expanded(
-                child: ListView(
+        child: Center(
+          child: _analyzing
+              ? Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    if (_result!['error'] != null)
-                      Text("Ошибка: ${_result!['error']}",
-                          style: const TextStyle(color: Colors.red))
+                    const SpinKitFadingCircle(color: Colors.green, size: 70),
+                    const SizedBox(height: 20),
+                    Text("Идёт анализ дерева...",
+                        style: TextStyle(fontSize: 18, color: Colors.green.shade700)),
+                  ],
+                )
+              : Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    if (_image != null)
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.file(_image!, height: 250, fit: BoxFit.cover),
+                      )
                     else
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text("🌳 Вид: ${_result!['species']} "
-                              "(${_result!['confidence']}%)"),
-                          Text("📏 Высота: ${_result!['height_m']} м"),
-                          Text("🌿 Крона: ${_result!['crown_len_m']} м"),
-                          Text("🪵 Ствол: ${_result!['dbh_cm']} см"),
-                          Text("💨 Ветер: ${_result!['weather']['wind']} м/с"),
-                          Text("🌡 Температура: ${_result!['weather']['temp']}°C"),
-                          Text("🪴 Почва: k=${_result!['soil']['k_soil']}"),
-                          Text("⚠️ Риск: ${_result!['risk']['level']} "
-                              "(${_result!['risk']['score']})"),
-                        ],
+                      Container(
+                        height: 250,
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: Colors.grey[200],
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Center(
+                            child: Text("📸 Загрузите фото дерева",
+                                style: TextStyle(fontSize: 18, color: Colors.grey))),
                       ),
+                    const SizedBox(height: 20),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: () => _pickImage(ImageSource.camera),
+                          icon: const Icon(Icons.camera_alt),
+                          label: const Text("Камера"),
+                        ),
+                        ElevatedButton.icon(
+                          onPressed: () => _pickImage(ImageSource.gallery),
+                          icon: const Icon(Icons.photo),
+                          label: const Text("Галерея"),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                    ElevatedButton.icon(
+                      onPressed: _image != null ? _analyzeTree : null,
+                      icon: const Icon(Icons.analytics),
+                      label: const Text("Анализировать"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green.shade600,
+                        minimumSize: const Size(180, 45),
+                      ),
+                    ),
                   ],
                 ),
-              ),
-          ],
         ),
       ),
     );
