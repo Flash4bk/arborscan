@@ -1,5 +1,6 @@
 import os
 import io
+import sys
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -8,10 +9,9 @@ from PIL import Image
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 
-# === Импорты (теперь в одной папке) ===
+# === Импорты из server ===
 from server.classify_tree import classify_tree
 from server.risk_analysis import get_weather, get_soil, soil_factor, compute_risk
-
 
 # === Инициализация FastAPI ===
 app = FastAPI(
@@ -86,7 +86,7 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
         y_top, y_bottom = ys.min(), ys.max()
         H_m = (y_bottom - y_top) * scale
 
-        # === 5. Диаметр ствола ===
+        # === 5. DBH (на высоте груди) ===
         y_dbh = int(y_bottom - 1.3 / scale)
         DBH_m = 0
         if 0 <= y_dbh < mask_bin.shape[0]:
@@ -95,7 +95,18 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
                 x_left, x_right = np.where(row > 0)[0][[0, -1]]
                 DBH_m = (x_right - x_left) * scale
 
-        # === 6. Крона ===
+        # === 6. Реальный диаметр ствола (в нижней части) ===
+        lower_mask = mask_bin[int(y_bottom - (y_bottom - y_top) * 0.3):y_bottom, :]
+        proj = np.sum(lower_mask, axis=0)
+        nonzero = np.where(proj > 0)[0]
+        if len(nonzero) > 1:
+            diameter_px = nonzero[-1] - nonzero[0]
+            trunk_diameter_m = diameter_px * scale
+        else:
+            trunk_diameter_m = DBH_m
+        print(f"🪵 Диаметр ствола (у земли): {trunk_diameter_m*100:.1f} см")
+
+        # === 7. Длина кроны ===
         widths = np.array([mask_bin[y, :].sum() for y in range(y_top, y_bottom)], dtype=np.float32)
         dy = np.gradient(widths)
         crown_base_rel = np.argmax(dy > widths.max() * 0.3) if np.any(dy > widths.max() * 0.3) else int(len(widths) * 0.6)
@@ -104,28 +115,31 @@ async def analyze_tree(file: UploadFile = File(...), lat: float = 55.75, lon: fl
 
         print(f"📏 Высота={H_m:.2f}м, Крона={CL_m:.2f}м, DBH={DBH_m*100:.1f}см")
 
-        # === 7. Погода и почва ===
+        # === 8. Погода и почва ===
         wind_speed, gust, temp = get_weather(lat, lon)
+        print(f"🌬️ Ветер: {wind_speed} м/с, порывы: {gust} м/с, температура: {temp}°C")
         clay, sand, silt, bd, oc = get_soil(lat, lon)
         k_soil = soil_factor(clay, sand)
 
-        # === 8. Риск ===
+        # === 9. Риск ===
         risk, level = compute_risk(species, H_m, DBH_m, CL_m, wind_speed, gust, k_soil)
 
-        # === 9. Ответ ===
+        # === 10. Ответ ===
         result = {
             "species": species,
             "confidence": round(conf * 100, 1),
             "height_m": round(H_m, 2),
             "crown_len_m": round(CL_m, 2),
             "dbh_cm": round(DBH_m * 100, 1),
+            "trunk_diameter_cm": round(trunk_diameter_m * 100, 1),
             "weather": {"wind": wind_speed, "gust": gust, "temp": temp},
             "soil": {"clay": clay, "sand": sand, "k_soil": k_soil},
             "risk": {"score": round(risk, 1), "level": level}
         }
 
+        sys.stdout.flush()  # мгновенная отправка
         print("✅ Анализ завершён успешно.")
-        return JSONResponse(result)
+        return JSONResponse(content=result, media_type="application/json")
 
     except Exception as e:
         print("❌ Ошибка при анализе изображения:")
