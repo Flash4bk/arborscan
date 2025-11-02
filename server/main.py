@@ -9,8 +9,9 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 
 # === Импорты (теперь в одной папке) ===
-from classify_tree import classify_tree
-from risk_analysis import get_weather, get_soil, soil_factor, compute_risk
+from server.classify_tree import classify_tree
+from server.risk_analysis import get_weather, get_soil, soil_factor, compute_risk
+
 
 # === Инициализация FastAPI ===
 app = FastAPI(
