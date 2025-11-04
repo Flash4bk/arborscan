@@ -66,15 +66,30 @@ def segment_tree(image_rgb: np.ndarray):
     inp = img_resized.astype(np.float32) / 255.0
     inp = np.transpose(inp, (2, 0, 1))[None, ...]
     outputs = sess_tree.run(None, {sess_tree.get_inputs()[0].name: inp})
-    mask = outputs[1][0] if len(outputs) > 1 else outputs[0][0]
+
+    # --- корректное извлечение маски ---
+    if isinstance(outputs, (list, tuple)) and len(outputs) > 1:
+        mask = outputs[1][0]
+    else:
+        mask = outputs[0][0]
+
+    # --- нормализация ---
+    if mask.ndim == 3:
+        mask = mask[0]  # первый канал
+
     mask_bin = (mask > 0.35).astype(np.uint8)
 
+    # --- морфология ---
     kernel = np.ones((5, 5), np.uint8)
     mask_bin = cv2.morphologyEx(mask_bin, cv2.MORPH_OPEN, kernel)
     mask_bin = cv2.morphologyEx(mask_bin, cv2.MORPH_CLOSE, kernel)
 
-    # OpenCV требует uint8 (0-255)
+    # --- гарантируем CV_8UC1 ---
+    if mask_bin.ndim == 3:
+        mask_bin = cv2.cvtColor(mask_bin, cv2.COLOR_BGR2GRAY)
+
     mask_bin = (mask_bin * 255).astype(np.uint8)
+    print(f"🟢 Маска дерева успешно получена, тип: {mask_bin.dtype}, форма: {mask_bin.shape}")
     return mask_bin
 
 
@@ -107,7 +122,7 @@ async def analyze_tree(
         stick_len_px = detect_stick(img)
         if not stick_len_px:
             return JSONResponse({"error": "Эталонная рейка не найдена"}, status_code=400)
-        scale = 1.0 / stick_len_px  # 1 метр рейки = столько пикселей
+        scale = 1.0 / stick_len_px  # 1 м = столько пикселей
 
         # --- 4️⃣ сегментация дерева ---
         mask_bin = segment_tree(img)
@@ -150,7 +165,7 @@ async def analyze_tree(
         # --- 8️⃣ визуализация ---
         vis = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         color_mask = np.zeros_like(vis)
-        color_mask[:, :, 1] = mask_bin
+        color_mask[:, :, 1] = mask_bin  # зелёный слой
         vis = cv2.addWeighted(vis, 0.8, color_mask, 0.3, 0)
         cv2.rectangle(vis, (x, y_top), (x + w_box, y_bottom), (255, 0, 0), 2)
         cv2.putText(vis, f"H={height_m:.1f}m", (x + 5, y_top + 25),
