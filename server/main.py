@@ -7,9 +7,10 @@ from fastapi.responses import JSONResponse
 from io import BytesIO
 from PIL import Image
 
-from stick_detector import StickDetector
-from classify_tree import classify_tree
-from risk_analysis import get_weather, get_soil, compute_risk
+from server.stick_detector import StickDetector
+from server.classify_tree import classify_tree
+from server.risk_analysis import get_weather, get_soil, compute_risk
+
 
 # ---------------- ПУТИ -----------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
