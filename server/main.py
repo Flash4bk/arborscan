@@ -84,14 +84,19 @@ async def analyze_tree(
     try:
         print("📸 Анализ изображения...")
 
-        # 1️⃣ Загрузка изображения
-        image_bytes = await file.read()
-        img = np.array(Image.open(io.BytesIO(image_bytes)).convert("RGB"))
-        h, w = img.shape[:2]
+        # --- 1️⃣ читаем байты и открываем через PIL ---
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
 
-        # 2️⃣ Определение вида дерева
+        # --- 2️⃣ конвертируем в numpy (OpenCV формат RGB) ---
+        img = np.array(image)
+        h, w = img.shape[:2]
+        print(f"Изображение получено: {w}x{h}")
+
+        # --- 3️⃣ продолжаем как обычно ---
         species, conf = classify_tree(img)
         print(f"🌿 Вид дерева: {species} ({conf:.1f}%)")
+
 
         # 3️⃣ Поиск эталонной палки
         stick_len_px = detect_stick(img)
