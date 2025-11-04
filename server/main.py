@@ -43,21 +43,41 @@ print("✅ Модели успешно загружены.")
 # =====================================================================
 
 def detect_stick(image_rgb: np.ndarray):
-    """Находим эталонную рейку (1 м)."""
-    img_resized = cv2.resize(image_rgb, (640, 640))
-    inp = img_resized.astype(np.float32) / 255.0
-    inp = np.transpose(inp, (2, 0, 1))[None, ...]
-    output = sess_stick.run(None, {sess_stick.get_inputs()[0].name: inp})
-    det = output[0][0]
+    """Поиск эталонной рейки (1 м) на фото."""
+    try:
+        # --- нормализация изображения ---
+        img_resized = cv2.resize(image_rgb, (640, 640))
+        inp = img_resized.astype(np.float32) / 255.0
+        inp = np.transpose(inp, (2, 0, 1))[None, ...]  # [1,3,640,640]
 
-    if det.shape[0] == 0:
+        # --- инференс YOLO ---
+        outputs = sess_stick.run(None, {sess_stick.get_inputs()[0].name: inp})
+        dets = outputs[0][0]  # [N, 6+]
+
+        if dets is None or dets.size == 0:
+            print("⚠️ Палка не найдена (пустой выход модели)")
+            return None
+
+        # --- фильтрация по conf ---
+        confs = dets[:, 4]
+        valid = dets[confs > 0.1]  # допускаем даже слабые уверенности
+        if valid.shape[0] == 0:
+            print("⚠️ Объектов найдено, но conf < 0.1")
+            return None
+
+        # --- выбираем самый вероятный ---
+        best = valid[np.argmax(valid[:, 4])]
+        x1, y1, x2, y2, conf, *_ = best
+
+        # --- пересчёт в пикселях ---
+        length_px = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        print(f"📏 Эталон найден: {length_px:.1f}px, conf={conf:.2f}")
+        return length_px
+
+    except Exception as e:
+        print("❌ Ошибка в detect_stick:", e)
         return None
 
-    best = det[np.argmax(det[:, 4])]
-    x1, y1, x2, y2, conf, *_ = best
-    length_px = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-    print(f"📏 Эталон найден: {length_px:.1f}px, conf={conf:.2f}")
-    return length_px
 
 
 def segment_tree(image_rgb: np.ndarray):
