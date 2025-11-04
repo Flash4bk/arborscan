@@ -1,234 +1,136 @@
 import os
-import io
 import cv2
-import math
-import json
-import requests
 import numpy as np
 import onnxruntime as ort
-from PIL import Image
 from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from io import BytesIO
+from PIL import Image
 
-from server.classify_tree import classify_tree
-from server.risk_analysis import get_weather, compute_risk
+from stick_detector import StickDetector
+from classify_tree import classify_tree
+from risk_analysis import get_weather, get_soil, compute_risk
 
-app = FastAPI(title="ArborScan API", description="Tree analysis backend")
+# ---------------- ПУТИ -----------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TREE_MODEL = os.path.join(BASE_DIR, "models", "tree_seg.onnx")
+CLASSIFIER_MODEL = os.path.join(BASE_DIR, "models", "classifier.onnx")
+STICK_MODEL = os.path.join(BASE_DIR, "models", "stick_yolo.onnx")
 
-# --- Разрешаем Flutter доступ ---
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ---------------- СЕРВЕР -----------------
+app = FastAPI(title="ArborScan API", version="2.1")
 
-# --- Пути к моделям ---
-BASE_DIR = os.path.dirname(__file__)
-MODEL_DIR = os.path.join(BASE_DIR, "models")
-CLASSIFIER_MODEL = os.path.join(MODEL_DIR, "classifier.onnx")
-STICK_MODEL = os.path.join(MODEL_DIR, "stick_yolo.onnx")
-TREE_MODEL = os.path.join(MODEL_DIR, "tree_seg.onnx")
-
-print("🔄 Загружаем модели...")
-sess_classifier = ort.InferenceSession(CLASSIFIER_MODEL, providers=["CPUExecutionProvider"])
-sess_stick = ort.InferenceSession(STICK_MODEL, providers=["CPUExecutionProvider"])
-sess_tree = ort.InferenceSession(TREE_MODEL, providers=["CPUExecutionProvider"])
+# ---------------- МОДЕЛИ -----------------
+print("🚀 Загружаем модели ONNX...")
+tree_session = ort.InferenceSession(TREE_MODEL, providers=["CPUExecutionProvider"])
+class_session = ort.InferenceSession(CLASSIFIER_MODEL, providers=["CPUExecutionProvider"])
+stick_detector = StickDetector(STICK_MODEL, img_size=640, conf_thres=0.15, iou_thres=0.45)
 print("✅ Модели успешно загружены.")
 
 
-# =====================================================================
-# ---------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------------------
-# =====================================================================
-
-def detect_stick(image_rgb: np.ndarray):
-    """Поиск эталонной рейки (1 м) на фото."""
-    try:
-        # --- нормализация изображения ---
-        img_resized = cv2.resize(image_rgb, (640, 640))
-        inp = img_resized.astype(np.float32) / 255.0
-        inp = np.transpose(inp, (2, 0, 1))[None, ...]  # [1,3,640,640]
-
-        # --- инференс YOLO ---
-        outputs = sess_stick.run(None, {sess_stick.get_inputs()[0].name: inp})
-        dets = outputs[0][0]  # [N, 6+]
-
-        if dets is None or dets.size == 0:
-            print("⚠️ Палка не найдена (пустой выход модели)")
-            return None
-
-        # --- фильтрация по conf ---
-        confs = dets[:, 4]
-        valid = dets[confs > 0.1]  # допускаем даже слабые уверенности
-        if valid.shape[0] == 0:
-            print("⚠️ Объектов найдено, но conf < 0.1")
-            return None
-
-        # --- выбираем самый вероятный ---
-        best = valid[np.argmax(valid[:, 4])]
-        x1, y1, x2, y2, conf, *_ = best
-
-        # --- пересчёт в пикселях ---
-        length_px = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-        print(f"📏 Эталон найден: {length_px:.1f}px, conf={conf:.2f}")
-        return length_px
-
-    except Exception as e:
-        print("❌ Ошибка в detect_stick:", e)
-        return None
-
-
-
-def segment_tree(image_rgb: np.ndarray):
-    """Сегментация дерева."""
-    img_resized = cv2.resize(image_rgb, (640, 640))
-    inp = img_resized.astype(np.float32) / 255.0
-    inp = np.transpose(inp, (2, 0, 1))[None, ...]
-    outputs = sess_tree.run(None, {sess_tree.get_inputs()[0].name: inp})
-
-    # --- корректное извлечение маски ---
-    if isinstance(outputs, (list, tuple)) and len(outputs) > 1:
-        mask = outputs[1][0]
-    else:
-        mask = outputs[0][0]
-
-    # --- нормализация ---
-    if mask.ndim == 3:
-        mask = mask[0]  # первый канал
-
-    mask_bin = (mask > 0.35).astype(np.uint8)
-
-    # --- морфология ---
-    kernel = np.ones((5, 5), np.uint8)
-    mask_bin = cv2.morphologyEx(mask_bin, cv2.MORPH_OPEN, kernel)
-    mask_bin = cv2.morphologyEx(mask_bin, cv2.MORPH_CLOSE, kernel)
-
-    # --- гарантируем CV_8UC1 ---
-    if mask_bin.ndim == 3:
-        mask_bin = cv2.cvtColor(mask_bin, cv2.COLOR_BGR2GRAY)
-
-    mask_bin = (mask_bin * 255).astype(np.uint8)
-    print(f"🟢 Маска дерева успешно получена, тип: {mask_bin.dtype}, форма: {mask_bin.shape}")
-    return mask_bin
-
-
-# =====================================================================
-# ---------------------------- ОСНОВНОЙ API ----------------------------
-# =====================================================================
-
+# =========================================================
+#                     ОСНОВНАЯ ФУНКЦИЯ
+# =========================================================
 @app.post("/analyze")
 async def analyze_tree(
     file: UploadFile = File(...),
     lat: float = Form(None),
-    lon: float = Form(None),
-    api_key: str = Form("")
+    lon: float = Form(None)
 ):
     try:
-        print("📸 Анализ изображения...")
-
-        # --- 1️⃣ читаем изображение ---
+        # ---------- Загружаем фото ----------
         contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
-        img = np.array(image)
-        h, w = img.shape[:2]
-        print(f"Изображение получено: {w}x{h}")
+        img = Image.open(BytesIO(contents)).convert("RGB")
+        img_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        h_img, w_img = img_bgr.shape[:2]
+        print(f"📷 Изображение получено: {w_img}x{h_img}")
 
-        # --- 2️⃣ определяем вид дерева ---
-        species, conf = classify_tree(img)
-        print(f"🌿 Вид: {species} ({conf:.1f}%)")
+        # ---------- Классификация вида ----------
+        species, conf_cls = classify_tree(img_bgr, class_session)
+        print(f"🌿 Определён вид: {species} ({conf_cls:.1f}% уверенности)")
 
-        # --- 3️⃣ определяем эталонную рейку ---
-        stick_len_px = detect_stick(img)
-        if not stick_len_px:
-            return JSONResponse({"error": "Эталонная рейка не найдена"}, status_code=400)
-        scale = 1.0 / stick_len_px  # 1 м = столько пикселей
+        # ---------- Сегментация дерева ----------
+        blob = cv2.resize(img_bgr, (640, 640))
+        blob = blob.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+        mask = tree_session.run(None, {tree_session.get_inputs()[0].name: blob})[0][0]
+        mask = cv2.resize(mask, (w_img, h_img))
+        mask_bin = (mask > 0.5).astype(np.uint8)
 
-        # --- 4️⃣ сегментация дерева ---
-        mask_bin = segment_tree(img)
-        contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return JSONResponse({"error": "Не удалось выделить дерево"}, status_code=400)
-        cnt = max(contours, key=cv2.contourArea)
-        x, y, w_box, h_box = cv2.boundingRect(cnt)
-        ys, xs = np.where(mask_bin > 0)
-        y_bottom = np.max(ys)
-        y_top = int(np.percentile(ys, 5))
+        # ---------- Поиск рейки ----------
+        stick_box, stick_conf = stick_detector(img_bgr)
+        scale_m_per_px = None
+        overlay = img_bgr.copy()
 
-        # --- 5️⃣ геометрические характеристики ---
-        height_px = y_bottom - y_top
-        height_m = height_px * scale
-        row_y = int(y_bottom - height_px * 0.05)
-        xs_row = np.where(mask_bin[row_y, :] > 0)[0]
-        dbh_px = (xs_row[-1] - xs_row[0]) if len(xs_row) > 1 else 0
-        dbh_m = dbh_px * scale
-        crown_m = height_m / 3.0
-
-        # --- 6️⃣ данные о погоде ---
-        wind, gust, temp = None, None, None
-        if lat and lon and api_key:
-            wind, gust, temp = get_weather(lat, lon, api_key)
+        if stick_box is not None:
+            x1, y1, x2, y2 = map(int, stick_box)
+            stick_h_px = max(1, y2 - y1)
+            scale_m_per_px = 1.0 / stick_h_px
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 0, 255), 2)
+            cv2.putText(overlay, f"Stick {stick_conf:.2f}", (x1, y1 - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+            print(f"📏 Рейка найдена: {stick_h_px:.1f}px, conf={stick_conf:.2f}")
         else:
-            print("⚠️ Нет данных GPS или ключа погоды")
+            print("⚠️ Рейка не найдена, масштаб неизвестен")
 
-        # --- 7️⃣ расчёт риска ---
-        if wind and dbh_m:
-            score, level = compute_risk(species, height_m, dbh_m, crown_m, wind, gust, soil_factor=1.0)
+        # ---------- Извлекаем размеры дерева ----------
+        y_indices = np.where(mask_bin.sum(axis=1) > 20)[0]
+        if len(y_indices) > 0:
+            y_top, y_bottom = y_indices[0], y_indices[-1]
+            h_px = y_bottom - y_top
         else:
-            score, level = 0.0, "Нет данных"
-        risk = {
-            "level": level,
-            "score": score,
-            "note": "Риск рассчитан частично" if level != "Нет данных" else "Недостаточно данных для анализа"
-        }
+            h_px = 0
 
-        # --- 8️⃣ визуализация ---
-        # --- 8️⃣ визуализация ---
-        vis = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        # ---------- Вычисляем метрики ----------
+        if scale_m_per_px is not None:
+            height_m = h_px * scale_m_per_px
+            diam_cm = 100 * 0.02 * h_px  # примерная пропорция DBH
+        else:
+            height_m = None
+            diam_cm = None
 
-        # приводим маску к размеру исходного изображения
-        mask_resized = cv2.resize(mask_bin, (vis.shape[1], vis.shape[0]), interpolation=cv2.INTER_NEAREST)
+        # ---------- Погода и почва ----------
+        weather = get_weather(lat, lon) if lat and lon else None
+        soil = get_soil(lat, lon) if lat and lon else None
 
-        color_mask = np.zeros_like(vis)
-        color_mask[:, :, 1] = mask_resized  # зелёный канал
-        vis = cv2.addWeighted(vis, 0.8, color_mask, 0.3, 0)
+        if weather is None:
+            print("🌤 Нет данных GPS или погоды")
+        if soil is None:
+            print("🌍 Нет данных по почве")
 
-        cv2.rectangle(vis, (x, y_top), (x + w_box, y_bottom), (255, 0, 0), 2)
-        cv2.putText(vis, f"H={height_m:.1f}m", (x + 5, y_top + 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        cv2.putText(vis, f"D={dbh_m * 100:.1f}cm", (x + 5, y_bottom - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        # ---------- Риск падения ----------
+        if weather and soil and height_m:
+            risk, level = compute_risk(height_m, diam_cm, weather, soil)
+        else:
+            risk, level = None, None
 
-        output_path = os.path.join(BASE_DIR, "analyzed_tree.png")
-        cv2.imwrite(output_path, vis)
+        # ---------- Визуализация ----------
+        mask_colored = np.repeat(mask_bin[:, :, None], 3, axis=2) * np.array([0, 255, 0])
+        overlay = cv2.addWeighted(overlay, 0.7, mask_colored.astype(np.uint8), 0.3, 0)
+        cv2.putText(overlay, f"H={height_m:.1f}m" if height_m else "H=?",
+                    (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(overlay, f"D={diam_cm:.1f}cm" if diam_cm else "D=?",
+                    (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
+        result_path = os.path.join(BASE_DIR, "analyzed_tree.png")
+        cv2.imwrite(result_path, overlay)
+        print(f"🖼 Визуализация сохранена: {result_path}")
 
-        # --- 9️⃣ готовим результат ---
-        result = {
+        # ---------- Ответ ----------
+        return JSONResponse({
             "species": species,
-            "confidence": conf,
-            "height_m": round(height_m, 2),
-            "crown_m": round(crown_m, 2),
-            "dbh_cm": round(dbh_m * 100, 1),
-            "wind": wind,
-            "gust": gust,
-            "temperature": temp,
-            "risk": risk,
-            "image_path": "/image"
-        }
-
-        print("✅ Анализ успешно завершён.")
-        return JSONResponse(result)
+            "confidence": conf_cls,
+            "height_m": round(height_m, 2) if height_m else None,
+            "diameter_cm": round(diam_cm, 2) if diam_cm else None,
+            "weather": weather if weather else "Нет данных",
+            "soil": soil if soil else "Нет данных",
+            "risk": risk if risk else "Не рассчитан",
+            "risk_level": level if level else "Нет данных",
+            "stick_detected": stick_conf is not None
+        })
 
     except Exception as e:
-        print("❌ Ошибка при анализе:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.get("/image")
-def get_image():
-    """Возвращает сохранённое изображение"""
-    path = os.path.join(BASE_DIR, "analyzed_tree.png")
-    if not os.path.exists(path):
-        return JSONResponse({"error": "Изображение не найдено"}, status_code=404)
-    return FileResponse(path, media_type="image/png", filename="analyzed_tree.png")
+        print(f"❌ Ошибка при анализе изображения: {e}")
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500
+        )
