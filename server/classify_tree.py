@@ -1,40 +1,45 @@
-import onnxruntime as ort
 import numpy as np
 import cv2
-
-labels = ["Берёза", "Дуб", "Ель", "Сосна", "Тополь"]
-CLASSIFIER_MODEL = "server/models/classifier.onnx"
+import onnxruntime as ort
 
 
-def classify_tree(image_input):
+# Загружаем модель один раз при инициализации
+MODEL_PATH = "server/models/classifier.onnx"
+session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+
+# Маппинг меток классов (пример)
+TREE_LABELS = ["Берёза", "Сосна", "Ель", "Дуб", "Тополь", "Неизвестно"]
+
+
+def preprocess_image(image: np.ndarray):
+    """Предобработка изображения под модель классификации."""
+    img = cv2.resize(image, (224, 224))
+    img = img.astype(np.float32) / 255.0
+    img = np.transpose(img, (2, 0, 1))  # (HWC → CHW)
+    img = np.expand_dims(img, axis=0)   # Добавляем batch
+    return img
+
+
+def classify_tree(image: np.ndarray, model=None):
     """
-    Классификация дерева по фото.
-    Поддерживает np.ndarray RGB (например, из OpenCV или PIL).
+    Классификация дерева.
+    image — numpy.ndarray
+    model — (необязательно) объект модели ONNX
     """
     try:
-        # --- если пришёл NumPy массив ---
-        if isinstance(image_input, np.ndarray):
-            # приводим к RGB (если вдруг BGR)
-            if image_input.shape[2] == 3:
-                img_rgb = cv2.cvtColor(image_input, cv2.COLOR_BGR2RGB)
-            else:
-                raise ValueError("Ожидалось изображение с 3 каналами (RGB).")
+        input_name = session.get_inputs()[0].name
+        output_name = session.get_outputs()[0].name
 
-            # ресайз под ResNet-18
-            img_resized = cv2.resize(img_rgb, (224, 224))
-            img = img_resized.astype(np.float32) / 255.0
-            img = np.transpose(img, (2, 0, 1))[None, :, :, :]  # [1,3,224,224]
+        img_input = preprocess_image(image)
+        pred = session.run([output_name], {input_name: img_input})[0]
 
-        else:
-            raise TypeError("classify_tree принимает только np.ndarray")
+        idx = int(np.argmax(pred))
+        confidence = float(pred[0][idx])
 
-        # --- инференс ---
-        sess = ort.InferenceSession(CLASSIFIER_MODEL, providers=["CPUExecutionProvider"])
-        probs = sess.run(None, {"image": img})[0][0]
-        pred = int(np.argmax(probs))
-        conf = float(np.max(probs)) * 100
-        return labels[pred], conf
+        label = TREE_LABELS[idx] if idx < len(TREE_LABELS) else "Неизвестно"
+
+        return label, confidence
 
     except Exception as e:
-        print("Ошибка в classify_tree:", e)
+        print(f"Ошибка классификации дерева: {e}")
         return "Неизвестно", 0.0
