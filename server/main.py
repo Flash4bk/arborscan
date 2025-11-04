@@ -163,10 +163,16 @@ async def analyze_tree(
         }
 
         # --- 8️⃣ визуализация ---
+        # --- 8️⃣ визуализация ---
         vis = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+        # приводим маску к размеру исходного изображения
+        mask_resized = cv2.resize(mask_bin, (vis.shape[1], vis.shape[0]), interpolation=cv2.INTER_NEAREST)
+
         color_mask = np.zeros_like(vis)
-        color_mask[:, :, 1] = mask_bin  # зелёный слой
+        color_mask[:, :, 1] = mask_resized  # зелёный канал
         vis = cv2.addWeighted(vis, 0.8, color_mask, 0.3, 0)
+
         cv2.rectangle(vis, (x, y_top), (x + w_box, y_bottom), (255, 0, 0), 2)
         cv2.putText(vis, f"H={height_m:.1f}m", (x + 5, y_top + 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
@@ -175,6 +181,7 @@ async def analyze_tree(
 
         output_path = os.path.join(BASE_DIR, "analyzed_tree.png")
         cv2.imwrite(output_path, vis)
+
 
         # --- 9️⃣ готовим результат ---
         result = {
