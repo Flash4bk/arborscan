@@ -43,7 +43,7 @@ print("✅ Модели успешно загружены.")
 # =====================================================================
 
 def detect_stick(image_rgb: np.ndarray):
-    """Находим эталонную рейку (1 м)"""
+    """Находим эталонную рейку (1 м)."""
     img_resized = cv2.resize(image_rgb, (640, 640))
     inp = img_resized.astype(np.float32) / 255.0
     inp = np.transpose(inp, (2, 0, 1))[None, ...]
@@ -61,7 +61,7 @@ def detect_stick(image_rgb: np.ndarray):
 
 
 def segment_tree(image_rgb: np.ndarray):
-    """Сегментация дерева"""
+    """Сегментация дерева."""
     img_resized = cv2.resize(image_rgb, (640, 640))
     inp = img_resized.astype(np.float32) / 255.0
     inp = np.transpose(inp, (2, 0, 1))[None, ...]
@@ -72,6 +72,9 @@ def segment_tree(image_rgb: np.ndarray):
     kernel = np.ones((5, 5), np.uint8)
     mask_bin = cv2.morphologyEx(mask_bin, cv2.MORPH_OPEN, kernel)
     mask_bin = cv2.morphologyEx(mask_bin, cv2.MORPH_CLOSE, kernel)
+
+    # OpenCV требует uint8 (0-255)
+    mask_bin = (mask_bin * 255).astype(np.uint8)
     return mask_bin
 
 
@@ -147,7 +150,7 @@ async def analyze_tree(
         # --- 8️⃣ визуализация ---
         vis = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         color_mask = np.zeros_like(vis)
-        color_mask[:, :, 1] = (mask_bin * 255)
+        color_mask[:, :, 1] = mask_bin
         vis = cv2.addWeighted(vis, 0.8, color_mask, 0.3, 0)
         cv2.rectangle(vis, (x, y_top), (x + w_box, y_bottom), (255, 0, 0), 2)
         cv2.putText(vis, f"H={height_m:.1f}m", (x + 5, y_top + 25),

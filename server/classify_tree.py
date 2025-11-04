@@ -1,6 +1,6 @@
 import onnxruntime as ort
 import numpy as np
-from PIL import Image
+import cv2
 
 labels = ["Берёза", "Дуб", "Ель", "Сосна", "Тополь"]
 CLASSIFIER_MODEL = "server/models/classifier.onnx"
@@ -8,33 +8,32 @@ CLASSIFIER_MODEL = "server/models/classifier.onnx"
 
 def classify_tree(image_input):
     """
-    Классификация дерева по изображению.
-    Принимает либо путь к файлу, либо np.ndarray (RGB).
+    Классификация дерева по фото.
+    Поддерживает np.ndarray RGB (например, из OpenCV или PIL).
     """
     try:
-        # --- если пришёл путь к файлу ---
-        if isinstance(image_input, str):
-            img = Image.open(image_input).convert("RGB")
-            img = np.asarray(img, dtype=np.float32) / 255.0
-            img = np.transpose(img, (2, 0, 1))[None, :, :, :]
-
-        # --- если пришёл numpy-массив ---
-        elif isinstance(image_input, np.ndarray):
-            if image_input.ndim == 3 and image_input.shape[2] == 3:
-                img = image_input.astype(np.float32) / 255.0
-                img = np.transpose(img, (2, 0, 1))[None, :, :, :]
+        # --- если пришёл NumPy массив ---
+        if isinstance(image_input, np.ndarray):
+            # приводим к RGB (если вдруг BGR)
+            if image_input.shape[2] == 3:
+                img_rgb = cv2.cvtColor(image_input, cv2.COLOR_BGR2RGB)
             else:
-                raise ValueError("Некорректный формат изображения (ожидалось RGB).")
+                raise ValueError("Ожидалось изображение с 3 каналами (RGB).")
+
+            # ресайз под ResNet-18
+            img_resized = cv2.resize(img_rgb, (224, 224))
+            img = img_resized.astype(np.float32) / 255.0
+            img = np.transpose(img, (2, 0, 1))[None, :, :, :]  # [1,3,224,224]
 
         else:
-            raise TypeError("Передан неподдерживаемый тип изображения")
+            raise TypeError("classify_tree принимает только np.ndarray")
 
-        # --- классификация ---
+        # --- инференс ---
         sess = ort.InferenceSession(CLASSIFIER_MODEL, providers=["CPUExecutionProvider"])
         probs = sess.run(None, {"image": img})[0][0]
         pred = int(np.argmax(probs))
-        confidence = float(np.max(probs)) * 100.0
-        return labels[pred], confidence
+        conf = float(np.max(probs)) * 100
+        return labels[pred], conf
 
     except Exception as e:
         print("Ошибка в classify_tree:", e)
