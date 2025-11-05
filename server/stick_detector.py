@@ -9,11 +9,14 @@ class StickDetector:
     def __init__(self, model_path: str):
         self.model_path = model_path
         self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
-        print(f"📦 StickDetector загружен: {model_path}")
+        # Определим автоматически размер входа из модели
+        input_shape = self.session.get_inputs()[0].shape
+        self.input_size = (input_shape[2], input_shape[3]) if len(input_shape) == 4 else (640, 640)
+        print(f"📦 StickDetector загружен: {model_path}, вход модели: {self.input_size}")
 
     def preprocess(self, image):
         """Resize + normalize под YOLOv8."""
-        img = cv2.resize(image, (640, 640))
+        img = cv2.resize(image, self.input_size)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.transpose(2, 0, 1)
         img = np.expand_dims(img, axis=0)
@@ -45,8 +48,8 @@ class StickDetector:
             x, y, w, h, conf, cls = tree_box
 
             # Пример расчётов (условно)
-            height_m = (h / 640) * 20.0
-            diameter_cm = (w / 640) * 100.0
+            height_m = (h / self.input_size[1]) * 20.0
+            diameter_cm = (w / self.input_size[0]) * 100.0
 
             return {
                 "bbox": [int(x - w / 2), int(y - h / 2), int(x + w / 2), int(y + h / 2)],
