@@ -1,13 +1,19 @@
-import io
-import os
-import cv2
-import base64
-import numpy as np
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import JSONResponse
-from classify_tree import classify_tree
-from stick_detector import StickDetector
-from risk_analysis import get_weather, get_soil, estimate_fall_risk
+# --- imports resilient to both 'server.main:app' and direct run ---
+import os, sys
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURR_DIR not in sys.path:
+    sys.path.append(CURR_DIR)
+
+try:
+    # когда запускаем как пакет: uvicorn server.main:app
+    from .classify_tree import classify_tree
+    from .risk_analysis import compute_risk  # если используешь
+    from .stick_detector import StickDetector  # если используешь
+except Exception:
+    # когда файл запускается напрямую (локально)
+    from classify_tree import classify_tree
+    from risk_analysis import compute_risk
+    from stick_detector import StickDetector
 
 app = FastAPI(title="ArborScan Server")
 
