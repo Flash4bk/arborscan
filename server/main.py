@@ -8,7 +8,7 @@ from server.risk_analysis import get_weather, get_soil, compute_risk
 from server.stick_detector import StickDetector
 import os
 
-app = FastAPI(title="ArborScan API", version="2.3")
+app = FastAPI(title="ArborScan API", version="2.4")
 
 print("🔄 Загружаем модели ONNX...")
 stick_detector = StickDetector("server/models/stick_yolo.onnx")
@@ -21,9 +21,9 @@ async def analyze_tree(
     lat: float = Form(None),
     lon: float = Form(None)
 ):
-    """Основной эндпоинт анализа дерева."""
+    """Основной эндпоинт анализа дерева с улучшенной визуализацией."""
     try:
-        # --- 1. Чтение изображения ---
+        # === 1. Чтение изображения ===
         image_bytes = await file.read()
         np_arr = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -32,51 +32,76 @@ async def analyze_tree(
         h, w = image.shape[:2]
         print(f"📷 Изображение получено: {w}x{h}")
 
-        # --- 2. Классификация дерева ---
+        # === 2. Классификация дерева ===
         species, confidence = classify_tree(image)
         print(f"🌿 Определён вид: {species} ({confidence * 100:.1f}% уверенности)")
 
-        # --- 3. Детекция ствола и палки ---
-        tree_data = stick_detector.detect(image)
-        if not tree_data:
+        # === 3. Детекция дерева/палок ===
+        detections = stick_detector.detect(image)
+        if not detections:
             raise ValueError("Не удалось определить дерево или ствол.")
+
+        tree_data = detections
         print(f"📏 Высота={tree_data['height']:.2f}м, D={tree_data['diameter']:.1f}см")
 
-        # --- 4. Получение данных о погоде и почве ---
+        # === 4. Получение данных GPS/погоды/почвы ===
         if lat and lon:
             try:
                 weather = get_weather(lat, lon)
                 soil = get_soil(lat, lon)
             except Exception:
                 weather, soil = None, None
-                print("⚠️ Ошибка при получении данных почвы или погоды.")
+                print("⚠️ Ошибка при получении данных погоды или почвы.")
         else:
             weather, soil = None, None
-            print("⚠️ Нет данных GPS, пропущены почва и погода.")
+            print("⚠️ Нет данных GPS — пропущены погодные параметры.")
 
-        # --- 5. Расчёт риска ---
+        # === 5. Расчёт риска ===
         try:
             risk_level, risk_score = compute_risk(tree_data, weather, soil)
         except Exception as e:
             print(f"⚠️ Ошибка при расчёте риска: {e}")
             risk_level, risk_score = "Не рассчитано", 0.0
 
-        # --- 6. Визуализация ---
-        vis_image = image.copy()
+        # === 6. Визуализация ===
+        vis = image.copy()
+        overlay = vis.copy()
+
+        # Прозрачная заливка для дерева
         if "bbox" in tree_data:
             x1, y1, x2, y2 = map(int, tree_data["bbox"])
-            cv2.rectangle(vis_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            cv2.putText(vis_image, f"H={tree_data['height']:.1f}m",
-                        (x1, max(y1 - 10, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.putText(vis_image, f"D={tree_data['diameter']:.1f}cm",
-                        (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            alpha = 0.35
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), -1)  # зелёный слой
+            vis = cv2.addWeighted(overlay, alpha, vis, 1 - alpha, 0)
 
+            # Контур дерева
+            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+            # Текст высоты
+            cv2.putText(vis, f"H={tree_data['height']:.1f}m",
+                        (x1, max(y1 - 10, 15)), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+            # Текст диаметра
+            cv2.putText(vis, f"D={tree_data['diameter']:.1f}cm",
+                        (x1, y2 + 25), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # Красная рамка для "палок" (если найдены другие боксы)
+        if "sticks" in tree_data:
+            for stick_box in tree_data["sticks"]:
+                sx1, sy1, sx2, sy2 = map(int, stick_box)
+                cv2.rectangle(vis, (sx1, sy1), (sx2, sy2), (0, 0, 255), 2)
+                cv2.putText(vis, "stick", (sx1, max(sy1 - 5, 15)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+        # Сохранение визуализации
         os.makedirs("server/output", exist_ok=True)
         output_path = "server/output/analyzed_tree.png"
-        cv2.imwrite(output_path, vis_image)
+        cv2.imwrite(output_path, vis)
         print(f"📸 Визуализация сохранена: {output_path}")
 
-        # --- 7. Ответ API ---
+        # === 7. Формирование результата ===
         result = {
             "species": species,
             "confidence": confidence,
