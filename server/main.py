@@ -115,17 +115,27 @@ async def analyze_tree(
         print(f"📸 Визуализация сохранена: {output_path}")
 
         # === 8. Финальный ответ ===
+        # Приведение всех значений к стандартным типам
+        def safe(v):
+            """Приводит numpy.float и др. к стандартному Python float."""
+            if isinstance(v, (np.floating, np.integer)):
+                return float(v)
+            return v
+
         result = {
-            "species": species,
-            "confidence": confidence,
+            "species": str(species),
+            "confidence": safe(confidence),
             "geometry": {
-                "height_m": detections["height"] if detections else None,
-                "diameter_cm": detections["diameter"] if detections else None
+                "height_m": safe(detections["height"]) if detections else None,
+                "diameter_cm": safe(detections["diameter"]) if detections else None
             },
-            "risk": {"level": risk_level, "score": risk_score},
+            "risk": {
+                "level": str(risk_level),
+                "score": safe(risk_score)
+            },
             "weather": weather if weather else "Нет данных",
             "soil": soil if soil else "Нет данных",
-            "visualization_path": output_path
+            "visualization_path": "server/output/analyzed_tree.png"
         }
 
         print("✅ Анализ завершён успешно.")
@@ -134,6 +144,7 @@ async def analyze_tree(
     except Exception as e:
         print(f"❌ Ошибка при анализе: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 
 @app.get("/")
