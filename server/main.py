@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from server.classify_tree import classify_tree
 from server.risk_analysis import get_weather, get_soil, compute_risk
 from server.stick_detector import StickDetector
+from fastapi.responses import FileResponse
 
 app = FastAPI(title="ArborScan API", version="2.5")
 
@@ -135,7 +136,7 @@ async def analyze_tree(
             },
             "weather": weather if weather else "Нет данных",
             "soil": soil if soil else "Нет данных",
-            "visualization_path": "server/output/analyzed_tree.png"
+            "visualization_url": f"https://{os.getenv('RAILWAY_STATIC_URL', 'arborscan-production.up.railway.app')}/image/analyzed_tree.png"
         }
 
         print("✅ Анализ завершён успешно.")
@@ -145,6 +146,14 @@ async def analyze_tree(
         print(f"❌ Ошибка при анализе: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
+@app.get("/image/{filename}")
+async def get_image(filename: str):
+    """Возвращает сохранённую визуализацию."""
+    filepath = os.path.join("server/output", filename)
+    if os.path.exists(filepath):
+        return FileResponse(filepath, media_type="image/png")
+    return JSONResponse(status_code=404, content={"error": "Файл не найден"})
 
 
 @app.get("/")
