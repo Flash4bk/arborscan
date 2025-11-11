@@ -12,7 +12,7 @@ class StickDetector:
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
         """Подготовка изображения"""
-        img = cv2.resize(image, (640, 640))
+        img = cv2.resize(image, (768, 768))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))
