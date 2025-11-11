@@ -15,7 +15,7 @@ class StickDetector:
         logger.info(f"StickDetector загружен: {self.input_shape}")
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
-        """Подготовка изображения под модель"""
+        """Подготовка изображения"""
         h, w = self.input_shape[2], self.input_shape[3]
         img = cv2.resize(image, (w, h))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -24,27 +24,38 @@ class StickDetector:
         return np.expand_dims(img, axis=0)
 
     def detect_stick(self, image: np.ndarray):
-        """Детектирование палки на изображении"""
+        """Детектирование палки"""
         try:
             input_tensor = self.preprocess(image)
             outputs = self.session.run(None, {self.input_name: input_tensor})
-            detections = outputs[0]
 
-            if len(detections) == 0:
-                logger.warning("Палка не обнаружена.")
+            if len(outputs) == 0 or outputs[0] is None:
+                logger.warning("Выход модели пустой — палка не найдена.")
                 return None
 
-            best_det = detections[0]  # первая детекция
+            detections = np.array(outputs[0])
+            if detections.size == 0:
+                logger.warning("Детекции отсутствуют.")
+                return None
 
-            # Преобразуем все значения безопасно в числа
-            x1, y1, x2, y2, conf = [
-                float(v.item()) if hasattr(v, "item") else float(v)
-                for v in best_det[:5]
-            ]
+            best_det = detections[0]
 
+            # Безопасно извлекаем значения
+            values = []
+            for v in best_det[:5]:
+                if isinstance(v, np.ndarray):
+                    v = v.flatten()
+                    if v.size > 0:
+                        v = v[0]
+                try:
+                    values.append(float(v))
+                except Exception:
+                    values.append(0.0)
+
+            x1, y1, x2, y2, conf = values
             logger.info(f"Палка найдена: x1={x1:.1f}, y1={y1:.1f}, x2={x2:.1f}, y2={y2:.1f}, conf={conf:.2f}")
 
-            return (int(x1), int(y1), int(x2), int(y2), float(conf))
+            return (int(x1), int(y1), int(x2), int(y2), conf)
 
         except Exception as e:
             logger.error(f"Ошибка StickDetector: {e}")
