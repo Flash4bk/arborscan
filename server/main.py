@@ -7,10 +7,17 @@ from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
-# Внутренние импорты
-from classify_tree import classify_tree
-from stick_detector import StickDetector
-from risk_analysis import compute_risk
+# --- Корректные импорты внутри пакета ---
+try:
+    from server.classify_tree import classify_tree
+    from server.stick_detector import StickDetector
+    from server.risk_analysis import compute_risk
+except ImportError:
+    # Для локального запуска (python server/main.py)
+    from classify_tree import classify_tree
+    from stick_detector import StickDetector
+    from risk_analysis import compute_risk
+
 
 # --- Инициализация FastAPI ---
 app = FastAPI(title="ArborScan Server")
