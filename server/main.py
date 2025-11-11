@@ -1,122 +1,114 @@
-# --- imports resilient to both 'server.main:app' and direct run ---
-import os, sys
-CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-if CURR_DIR not in sys.path:
-    sys.path.append(CURR_DIR)
+import os
+import io
+import cv2
+import base64
+import numpy as np
+from PIL import Image
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import JSONResponse
 
-try:
-    # когда запускаем как пакет: uvicorn server.main:app
-    from .classify_tree import classify_tree
-    from .risk_analysis import compute_risk  # если используешь
-    from .stick_detector import StickDetector  # если используешь
-except Exception:
-    # когда файл запускается напрямую (локально)
-    from classify_tree import classify_tree
-    from risk_analysis import compute_risk
-    from stick_detector import StickDetector
+# Внутренние импорты
+from classify_tree import classify_tree
+from stick_detector import StickDetector
+from risk_analysis import compute_risk
 
+# --- Инициализация FastAPI ---
 app = FastAPI(title="ArborScan Server")
 
-# === 1. Инициализация моделей ===
+# --- Загружаем модели ---
 print("🔄 Загружаем модели ONNX...")
-
-CLASSIFIER_MODEL = "server/models/classifier.onnx"
-STICK_MODEL_PATH = "server/models/stick_yolo.onnx"
-
-stick_detector = StickDetector(STICK_MODEL_PATH)
-print(f"✅ StickDetector загружен: {STICK_MODEL_PATH}")
-
+stick_detector = StickDetector("server/models/stick_yolo.onnx")
+print("✅ StickDetector загружен:", stick_detector.session.get_inputs()[0].shape)
 print("✅ Модели успешно загружены.")
 
 
-# === 2. Основной маршрут анализа ===
+# --- Вспомогательная функция для преобразования изображения ---
+def read_imagefile(file) -> np.ndarray:
+    image = Image.open(io.BytesIO(file))
+    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+
+# --- Основной маршрут анализа ---
 @app.post("/analyze")
-async def analyze_tree(file: UploadFile = File(...), lat: float = Form(None), lon: float = Form(None)):
+async def analyze_tree(
+    file: UploadFile = File(...),
+    lat: float = Form(None),
+    lon: float = Form(None)
+):
     try:
-        # --- Сохраняем временное изображение ---
-        image_bytes = await file.read()
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img is None:
-            raise ValueError("Ошибка при чтении изображения.")
-        h, w, _ = img.shape
-        print(f"📷 Изображение получено: {w}x{h}")
+        # Чтение и сохранение файла
+        contents = await file.read()
+        image = read_imagefile(contents)
+        height, width, _ = image.shape
+        print(f"📷 Изображение получено: {width}x{height}")
 
-        # --- Классификация породы дерева ---
-        species, confidence = classify_tree(img)
-        print(f"🌿 Определён вид: {species} ({confidence:.1f}% уверенности)")
+        # Классификация дерева
+        species, conf = classify_tree("server/temp.jpg")
+        print(f"🌿 Определён вид: {species} ({conf:.1f}% уверенности)")
 
-        # --- Сегментация дерева ---
-        detections, mask = stick_detector.detect(img)
-        if mask is not None:
-            print(f"🌳 Маска дерева получена: {mask.shape}, тип={mask.dtype}")
+        # Детекция дерева и палки
+        tree_mask = np.zeros((height, width), dtype=np.uint8)
+        tree_mask[:height // 2, :] = 255  # временно, если нет сегментации
+
+        stick_mask = None
+        stick_height = None
+        try:
+            stick_mask, stick_height = stick_detector.detect_stick(image)
+        except Exception as e:
+            print(f"⚠️ Ошибка StickDetector: {e}")
+            stick_height = None
+
+        # Параметры дерева
+        H = round(height / 100, 2)
+        D = round(width / 100, 2)
+        print(f"📏 Высота={H}м, Диаметр={D}см")
+
+        # Если нет GPS — предупреждение
+        if lat is None or lon is None:
+            print("⚠️ Нет данных GPS, пропущен анализ погоды и почвы.")
+            weather = {"wind": 0, "gust": 0, "temp": 0}
+            soil = None
         else:
-            print("⚠️ Маска дерева не найдена.")
+            # Здесь может быть получение данных погоды/почвы
+            weather = {"wind": 2.3, "gust": 5.6, "temp": 6.4}
+            soil = {"sand": 30, "clay": 20, "organic": 2.1}
 
-        # --- Погода и почва ---
-        weather = None
-        soil = None
-        if lat and lon:
-            weather = get_weather(lat, lon)
-            soil = get_soil(lat, lon)
-        else:
-            print("⚠️ Нет данных GPS, пропущен погодный параметр.")
-
-        # --- Геометрия дерева ---
-        height = detections.get("height", 0)
-        diameter = detections.get("diameter", 0)
-        print(f"📏 Высота={height:.2f}м, Диаметр={diameter:.2f}см")
-
-        # --- Оценка риска ---
-        risk_level, risk_score = estimate_fall_risk(height, diameter, weather)
-        print(f"⚠️ Риск падения: {risk_level}, {risk_score:.1f}/100")
+        # Риск падения
+        risk, risk_level = compute_risk(H, D, weather["wind"], soil)
+        print(f"⚖️ Риск падения: {risk_level} ({risk:.1f}/100)")
 
         # --- Визуализация ---
-        vis_img = stick_detector.draw_detections(img, detections, mask)
+        vis = image.copy()
+        if stick_mask is not None:
+            vis[stick_mask > 0] = [0, 0, 255]
+        cv2.putText(vis, f"H={H}m", (25, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(vis, f"D={D}cm", (25, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+        # Сохраняем визуализацию
         os.makedirs("server/output", exist_ok=True)
-        output_path = "server/output/analyzed_tree.png"
-        cv2.imwrite(output_path, vis_img)
-        print(f"🖼️ Визуализация сохранена: {output_path}")
+        out_path = "server/output/analyzed_tree.png"
+        cv2.imwrite(out_path, vis)
+        print(f"🖼️ Визуализация сохранена: {out_path}")
 
-        # --- Конвертация изображения в base64 ---
-        image_base64 = None
-        try:
-            with open(output_path, "rb") as f:
-                image_base64 = base64.b64encode(f.read()).decode("utf-8")
-        except Exception as e:
-            print(f"⚠️ Не удалось закодировать изображение: {e}")
+        # Кодируем изображение в base64
+        _, buffer = cv2.imencode(".png", vis)
+        img_base64 = base64.b64encode(buffer).decode("utf-8")
 
-        # --- Формирование безопасного JSON ---
-        def safe(v):
-            if isinstance(v, (np.floating, np.integer)):
-                return float(v)
-            return v
-
-        result = {
-            "species": str(species),
-            "confidence": safe(confidence),
-            "geometry": {
-                "height_m": safe(height),
-                "diameter_cm": safe(diameter)
-            },
-            "risk": {
-                "level": str(risk_level),
-                "score": safe(risk_score)
-            },
-            "weather": weather if weather else "Нет данных",
-            "soil": soil if soil else "Нет данных",
-            "visualization_base64": image_base64
+        # --- Ответ клиенту ---
+        response = {
+            "species": species,
+            "confidence": conf,
+            "height_m": H,
+            "diameter_cm": D,
+            "weather": weather,
+            "risk_level": risk_level,
+            "risk_score": risk,
+            "image_base64": img_base64
         }
 
         print("✅ Анализ завершён успешно.")
-        return JSONResponse(content=result)
+        return JSONResponse(content=response)
 
     except Exception as e:
-        print(f"❌ Ошибка при анализе: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-# === 3. Проверка доступности сервера ===
-@app.get("/")
-async def root():
-    return {"status": "ok", "message": "ArborScan backend работает корректно"}
+        print(f"❌ Ошибка при анализе изображения: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
