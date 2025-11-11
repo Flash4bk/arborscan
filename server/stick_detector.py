@@ -1,46 +1,51 @@
-import onnxruntime as ort
-import numpy as np
 import cv2
+import numpy as np
+import onnxruntime as ort
+import logging
 
+logger = logging.getLogger(__name__)
 
 class StickDetector:
-    def __init__(self, model_path="server/models/stick_yolo.onnx"):
-        """Инициализация модели для детекции палки"""
+    def __init__(self, model_path: str):
+        self.model_path = model_path
+        logger.info(f"Загрузка модели палки из {model_path}...")
         self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         self.input_name = self.session.get_inputs()[0].name
         self.input_shape = self.session.get_inputs()[0].shape
+        logger.info(f"StickDetector загружен: {self.input_shape}")
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
-        """Подготовка изображения"""
-        img = cv2.resize(image, (768, 768))
+        """Подготовка изображения под модель"""
+        h, w = self.input_shape[2], self.input_shape[3]
+        img = cv2.resize(image, (w, h))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))
         return np.expand_dims(img, axis=0)
 
     def detect_stick(self, image: np.ndarray):
-        """Поиск палки на фото"""
-        blob = self.preprocess(image)
-        outputs = self.session.run(None, {self.input_name: blob})
-        detections = outputs[0]
+        """Детектирование палки на изображении"""
+        try:
+            input_tensor = self.preprocess(image)
+            outputs = self.session.run(None, {self.input_name: input_tensor})
+            detections = outputs[0]
 
-        # Находим самую крупную детекцию (палку)
-        if len(detections) == 0:
-            raise ValueError("Палка не найдена")
+            if len(detections) == 0:
+                logger.warning("Палка не обнаружена.")
+                return None
 
-        best_det = detections[0]
-        x1, y1, x2, y2 = [int(v.item()) if hasattr(v, "item") else int(v) for v in best_det[:4]]
-        conf = float(best_det[4].item()) if hasattr(best_det[4], "item") else float(best_det[4])
+            best_det = detections[0]  # первая детекция
 
+            # Преобразуем все значения безопасно в числа
+            x1, y1, x2, y2, conf = [
+                float(v.item()) if hasattr(v, "item") else float(v)
+                for v in best_det[:5]
+            ]
 
-        if conf < 0.3:
-            raise ValueError("Слишком низкая уверенность детекции палки")
+            logger.info(f"Палка найдена: x1={x1:.1f}, y1={y1:.1f}, x2={x2:.1f}, y2={y2:.1f}, conf={conf:.2f}")
 
-        # Создаём маску
-        mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+            return (int(x1), int(y1), int(x2), int(y2), float(conf))
 
-        stick_height_m = round(abs(y2 - y1) / 100, 2)
-        print(f"📏 Палки найдена: высота ≈ {stick_height_m} м")
-
-        return mask, stick_height_m
+        except Exception as e:
+            logger.error(f"Ошибка StickDetector: {e}")
+            return None
