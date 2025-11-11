@@ -29,8 +29,9 @@ class StickDetector:
             raise ValueError("Палка не найдена")
 
         best_det = detections[0]
-        x1, y1, x2, y2 = map(int, best_det[:4])
-        conf = float(best_det[4])
+        x1, y1, x2, y2 = [int(v.item()) if hasattr(v, "item") else int(v) for v in best_det[:4]]
+        conf = float(best_det[4].item()) if hasattr(best_det[4], "item") else float(best_det[4])
+
 
         if conf < 0.3:
             raise ValueError("Слишком низкая уверенность детекции палки")
