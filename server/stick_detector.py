@@ -1,49 +1,45 @@
-import cv2
-import numpy as np
 import onnxruntime as ort
+import numpy as np
+import cv2
 
 
 class StickDetector:
-    def __init__(self, model_path: str):
-        print(f"🔄 Загружаем StickDetector из {model_path}...")
-        self.model = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
-        self.input_name = self.model.get_inputs()[0].name
-        input_shape = self.model.get_inputs()[0].shape
-        self.input_size = (input_shape[3], input_shape[2]) if len(input_shape) == 4 else (640, 640)
-        print(f"✅ StickDetector готов: вход модели {self.input_size}")
+    def __init__(self, model_path="server/models/stick_yolo.onnx"):
+        """Инициализация модели для детекции палки"""
+        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        self.input_name = self.session.get_inputs()[0].name
+        self.input_shape = self.session.get_inputs()[0].shape
 
-    def detect(self, image: np.ndarray):
-        """Детектирует дерево и возвращает маску и геометрию."""
-        img = cv2.resize(image, self.input_size)
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img_in = img_rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
-        img_in = np.expand_dims(img_in, axis=0)
+    def preprocess(self, image: np.ndarray) -> np.ndarray:
+        """Подготовка изображения"""
+        img = cv2.resize(image, (640, 640))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) / 255.0
+        img = np.transpose(img, (2, 0, 1))
+        return np.expand_dims(img, axis=0)
 
-        outputs = self.model.run(None, {self.input_name: img_in})
-        mask = (outputs[0][0] > 0.5).astype(np.uint8) * 255
-        mask = cv2.resize(mask, (image.shape[1], image.shape[0]))
+    def detect_stick(self, image: np.ndarray):
+        """Поиск палки на фото"""
+        blob = self.preprocess(image)
+        outputs = self.session.run(None, {self.input_name: blob})
+        detections = outputs[0]
 
-        # Вычисляем параметры
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return {}, mask
-        x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
-        height_m = round(h / 100, 2)
-        diameter_cm = round(w / 5, 2)
+        # Находим самую крупную детекцию (палку)
+        if len(detections) == 0:
+            raise ValueError("Палка не найдена")
 
-        return {"height": height_m, "diameter": diameter_cm}, mask
+        best_det = detections[0]
+        x1, y1, x2, y2 = map(int, best_det[:4])
+        conf = float(best_det[4])
 
-    def draw_detections(self, image, detections, mask):
-        """Рисует результат анализа."""
-        vis = image.copy()
-        if mask is not None:
-            colored_mask = cv2.applyColorMap(mask, cv2.COLORMAP_SUMMER)
-            vis = cv2.addWeighted(vis, 0.7, colored_mask, 0.3, 0)
+        if conf < 0.3:
+            raise ValueError("Слишком низкая уверенность детекции палки")
 
-        x = 20
-        y = 40
-        cv2.rectangle(vis, (x, y - 30), (x + 180, y + 40), (255, 255, 255), -1)
-        cv2.putText(vis, f"H={detections.get('height', 0)}m", (x + 10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-        cv2.putText(vis, f"D={detections.get('diameter', 0)}cm", (x + 10, y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        # Создаём маску
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
 
-        return vis
+        stick_height_m = round(abs(y2 - y1) / 100, 2)
+        print(f"📏 Палки найдена: высота ≈ {stick_height_m} м")
+
+        return mask, stick_height_m

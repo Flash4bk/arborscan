@@ -1,45 +1,34 @@
+import onnxruntime as ort
 import numpy as np
 import cv2
-import onnxruntime as ort
+
+CLASSIFIER_MODEL = "server/models/classifier.onnx"
+
+# Инициализация ONNX-сессии
+sess = ort.InferenceSession(CLASSIFIER_MODEL, providers=["CPUExecutionProvider"])
+
+# Метки классов (замени своими)
+TREE_CLASSES = ["Берёза", "Дуб", "Ель", "Сосна", "Тополь"]
 
 
-# Загружаем модель один раз при инициализации
-MODEL_PATH = "server/models/classifier.onnx"
-session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+def classify_tree(image_path: str):
+    """Классификация дерева по изображению"""
+    image = cv2.imread(image_path)
+    if image is None:
+        raise ValueError(f"Не удалось открыть изображение: {image_path}")
 
-# Маппинг меток классов (пример)
-TREE_LABELS = ["Берёза", "Сосна", "Ель", "Дуб", "Тополь", "Неизвестно"]
-
-
-def preprocess_image(image: np.ndarray):
-    """Предобработка изображения под модель классификации."""
+    # Подготовка входных данных (Resize + Normalize)
     img = cv2.resize(image, (224, 224))
     img = img.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))  # (HWC → CHW)
-    img = np.expand_dims(img, axis=0)   # Добавляем batch
-    return img
+    img = np.transpose(img, (2, 0, 1))
+    img = np.expand_dims(img, axis=0)
 
+    input_name = sess.get_inputs()[0].name
+    output_name = sess.get_outputs()[0].name
 
-def classify_tree(image: np.ndarray, model=None):
-    """
-    Классификация дерева.
-    image — numpy.ndarray
-    model — (необязательно) объект модели ONNX
-    """
-    try:
-        input_name = session.get_inputs()[0].name
-        output_name = session.get_outputs()[0].name
+    pred = sess.run([output_name], {input_name: img})[0]
+    probs = np.exp(pred) / np.sum(np.exp(pred))
+    idx = int(np.argmax(probs))
+    conf = float(probs[0][idx]) * 100
 
-        img_input = preprocess_image(image)
-        pred = session.run([output_name], {input_name: img_input})[0]
-
-        idx = int(np.argmax(pred))
-        confidence = float(pred[0][idx])
-
-        label = TREE_LABELS[idx] if idx < len(TREE_LABELS) else "Неизвестно"
-
-        return label, confidence
-
-    except Exception as e:
-        print(f"Ошибка классификации дерева: {e}")
-        return "Неизвестно", 0.0
+    return TREE_CLASSES[idx], round(conf, 1)
